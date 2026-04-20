@@ -60,12 +60,14 @@ func (c *h3DatagramConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 func (c *h3DatagramConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	for {
 		ctx := c.ctx
+		var cancel context.CancelFunc
 		if dl, ok := c.rd.Load().(time.Time); ok && !dl.IsZero() {
-			var cancel context.CancelFunc
 			ctx, cancel = context.WithDeadline(ctx, dl)
-			defer cancel()
 		}
 		data, err := c.rs.ReceiveDatagram(ctx)
+		if cancel != nil {
+			cancel()
+		}
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
 				return 0, c.target, os.ErrDeadlineExceeded
