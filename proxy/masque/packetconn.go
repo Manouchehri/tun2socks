@@ -13,6 +13,8 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
+
+	"github.com/xjasonlyu/tun2socks/v2/log"
 )
 
 // h3DatagramConn adapts an *http3.RequestStream carrying RFC 9298
@@ -84,7 +86,10 @@ func (c *h3DatagramConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		payload := data[n:]
 		copied := copy(p, payload)
 		if copied < len(payload) {
-			return copied, c.target, fmt.Errorf("masque: datagram truncated (%d > %d)", len(payload), len(p))
+			// Match real UDP sockets: truncate silently rather than
+			// returning a non-nil error, which tunnel/udp.go treats
+			// as terminal and would tear the session down.
+			log.Debugf("[MASQUE] datagram truncated (%d > %d)", len(payload), len(p))
 		}
 		return copied, c.target, nil
 	}
@@ -94,6 +99,10 @@ func (c *h3DatagramConn) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
 		close(c.done)
+		// rs.Close() only sends FIN on the send side; the drainCapsules
+		// goroutine reads from the receive side and would block until
+		// the peer closes. CancelRead wakes it up.
+		c.rs.CancelRead(quic.StreamErrorCode(h3RequestCancelled))
 		c.closeErr = c.rs.Close()
 	})
 	return c.closeErr

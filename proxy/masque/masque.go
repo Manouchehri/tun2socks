@@ -218,23 +218,25 @@ func (m *Masque) DialUDP(metadata *M.Metadata) (net.PacketConn, error) {
 		targetAddr.IP = ip
 	}
 
-	req := (&http.Request{
-		Method: http.MethodConnect,
-		Proto:  connectUDPProtocol,
-		URL:    rurl,
-		Host:   m.authority,
-		Header: http.Header{
-			http3.CapsuleProtocolHeader: []string{"?1"},
-		},
-	}).WithContext(context.Background())
-	if m.authHdr != "" {
-		req.Header.Set("Proxy-Authorization", m.authHdr)
-	}
-
 	for attempt := 0; attempt < 2; attempt++ {
 		cc, ver, err := m.getConn(context.Background())
 		if err != nil {
 			return nil, fmt.Errorf("masque: connect proxy: %w", err)
+		}
+		// Build a fresh request per attempt: quic-go's SendRequestHeader
+		// canonicalizes and may mutate the request, so reusing it across
+		// retries could send a different header set the second time.
+		req := (&http.Request{
+			Method: http.MethodConnect,
+			Proto:  connectUDPProtocol,
+			URL:    rurl,
+			Host:   m.authority,
+			Header: http.Header{
+				http3.CapsuleProtocolHeader: []string{"?1"},
+			},
+		}).WithContext(context.Background())
+		if m.authHdr != "" {
+			req.Header.Set("Proxy-Authorization", m.authHdr)
 		}
 		pc, err := m.dialOnce(cc, req, targetAddr)
 		if err == nil {
@@ -257,18 +259,37 @@ func (m *Masque) dialOnce(cc *http3.ClientConn, req *http.Request, target *net.U
 	if err != nil {
 		return nil, fmt.Errorf("open request stream: %w", err)
 	}
-	if err := rs.SendRequestHeader(req); err != nil {
+
+	// quic-go's SendRequestHeader ignores req.Context() and ReadResponse
+	// is unbounded once the stream is open. Enforce the overall dial
+	// timeout by cancelling the stream if ctx fires before we succeed.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			rs.CancelRead(quic.StreamErrorCode(h3RequestCancelled))
+			rs.CancelWrite(quic.StreamErrorCode(h3RequestCancelled))
+		case <-done:
+		}
+	}()
+
+	abort := func() {
+		rs.CancelRead(quic.StreamErrorCode(h3RequestCancelled))
 		rs.CancelWrite(quic.StreamErrorCode(h3RequestCancelled))
+	}
+
+	if err := rs.SendRequestHeader(req); err != nil {
+		abort()
 		return nil, fmt.Errorf("send CONNECT-UDP: %w", err)
 	}
 	resp, err := rs.ReadResponse()
 	if err != nil {
-		rs.CancelRead(quic.StreamErrorCode(h3RequestCancelled))
+		abort()
 		return nil, fmt.Errorf("read CONNECT-UDP response: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
-		rs.CancelRead(quic.StreamErrorCode(h3RequestCancelled))
-		rs.CancelWrite(quic.StreamErrorCode(h3RequestCancelled))
+		abort()
 		return nil, fmt.Errorf("masque: proxy rejected CONNECT-UDP: %s", resp.Status)
 	}
 
