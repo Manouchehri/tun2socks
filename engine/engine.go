@@ -207,7 +207,7 @@ func netstack(k *Key) (err error) {
 		return err
 	}
 
-	if _defaultProxy, err = parseProxy(k.Proxy); err != nil {
+	if _defaultProxy, err = buildProxy(k); err != nil {
 		return err
 	}
 	tunnel.T().SetProxy(_defaultProxy)
